@@ -38,7 +38,7 @@ pub(crate) struct PatternApp {
 
 impl Default for PatternApp {
     fn default() -> Self {
-        let document = Document::sample_skirt();
+        let document = Document::sample_curved_skirt();
         Self {
             saved_document: document.clone(),
             document,
@@ -51,7 +51,7 @@ impl Default for PatternApp {
             fit_pending: true,
             dirty: false,
             path: "pattern.json".into(),
-            status: "Sample skirt panel · 400 × 600 mm".into(),
+            status: "Curved sample panel · Drag H5 / H6 to shape the top edge".into(),
             error: false,
             undo_edits: Vec::new(),
             redo_edits: Vec::new(),
@@ -351,9 +351,10 @@ impl PatternApp {
                         piece.id.0, piece.metadata.cut_quantity, piece.metadata.fabric
                     ));
                     ui.label(format!(
-                        "{} points · {} segments",
+                        "{} points · {} lines · {} curves",
                         piece.points.len(),
-                        piece.segments.len()
+                        piece.segments.len(),
+                        piece.beziers.len()
                     ));
                     ui.label(&piece.metadata.notes);
                     ui.add_space(8.0);
@@ -361,10 +362,19 @@ impl PatternApp {
                 ui.separator();
                 ui.heading("Selected point");
                 if let Some(selection) = self.selected {
+                    let handle = self
+                        .document
+                        .piece(selection.piece)
+                        .is_some_and(|piece| piece.is_bezier_handle(selection.point));
                     ui.label(format!(
-                        "Piece {} / Point {}",
-                        selection.piece.0, selection.point.0
+                        "Piece {} / {}{}",
+                        selection.piece.0,
+                        if handle { "Handle H" } else { "Point P" },
+                        selection.point.0
                     ));
+                    if handle {
+                        ui.label("Bézier control handle");
+                    }
                     ui.horizontal(|ui| {
                         ui.label("X (mm)");
                         ui.add(
@@ -415,18 +425,20 @@ impl PatternApp {
                         self.select(None);
                     }
                 } else {
-                    ui.label("Click a corner to select it.");
+                    ui.label("Click a corner or a square handle.");
                 }
                 ui.add_space(16.0);
                 ui.separator();
                 ui.label(RichText::new("Canvas controls").strong());
                 ui.label("Drag a point to move");
+                ui.label("Drag H5 / H6 to bend the curve");
                 ui.label("Drag empty space to pan");
                 ui.label("Right / middle drag to pan");
                 ui.label("Scroll / pinch to zoom");
                 ui.label("X right · Y up");
                 ui.add_space(12.0);
                 ui.label("Grainline shown in amber");
+                ui.label("Bézier handles shown in violet");
             });
     }
 }
@@ -459,6 +471,49 @@ mod tests {
             piece: PieceId(1),
             point: PointId(1),
         }
+    }
+
+    #[test]
+    fn curve_handles_use_the_inspector_history_and_persistence_boundaries() {
+        let path = std::env::temp_dir().join(format!(
+            "seametric-curve-history-{}.json",
+            std::process::id()
+        ));
+        let mut app = PatternApp {
+            path: path.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let handle = Selection {
+            piece: PieceId(1),
+            point: PointId(5),
+        };
+        let original = app.document.clone();
+        app.select(Some(handle));
+        app.move_point(handle, MmPoint::new(280.0, 450.0));
+        let moved = app.document.clone();
+        app.edit_delta = MmPoint::new(-20.0, 10.0);
+        app.offset_selected_point();
+        let offset = app.document.clone();
+        assert_eq!(app.edit_position, MmPoint::new(260.0, 460.0));
+        app.undo();
+        assert_eq!(app.document, moved);
+        app.undo();
+        assert_eq!(app.document, original);
+        app.redo();
+        app.redo();
+        assert_eq!(app.document, offset);
+        app.save();
+        assert!(!app.error);
+        assert!(!app.dirty);
+        app.undo();
+        assert!(app.dirty);
+        app.load();
+        assert!(!app.error);
+        assert_eq!(app.document, offset);
+        assert!(app.selected.is_none());
+        assert!(!app.can_undo());
+        assert!(!app.dirty);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

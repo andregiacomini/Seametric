@@ -228,4 +228,43 @@ mod tests {
             serde_json::from_str::<PatternCommand>(&json.replace("\"delta\"", "\"to\"")).is_err()
         );
     }
+
+    #[test]
+    fn moving_a_curve_handle_updates_only_its_point_and_keeps_connectivity() {
+        let mut document = Document::sample_curved_skirt();
+        let original = document.clone();
+        let target = MmPoint::new(300.0, 440.0);
+        document.apply(move_to(1, 5, target)).unwrap();
+        let piece = &document.pieces[0];
+        assert_eq!(piece.beziers, original.pieces[0].beziers);
+        let controls = piece.bezier_controls(&piece.beziers[0]).unwrap();
+        assert_eq!(controls[1], target);
+        assert_eq!(
+            crate::cubic_bezier_point(controls, 0.5).unwrap(),
+            MmPoint::new(200.0, 510.0)
+        );
+        let mut expected = original;
+        expected.pieces[0].points[4].position = target;
+        assert_eq!(document, expected);
+        assert_eq!(
+            Document::from_json(&document.to_json().unwrap()).unwrap(),
+            document
+        );
+
+        let before = document.clone();
+        assert!(
+            document
+                .apply(move_to(1, 5, MmPoint::new(f64::NAN, 440.0)))
+                .is_err()
+        );
+        assert_eq!(document, before);
+        document.pieces[0].beziers[0].end = PointId(999);
+        let before = document.clone();
+        assert!(
+            document
+                .apply(move_to(1, 5, MmPoint::new(1.0, 2.0)))
+                .is_err()
+        );
+        assert_eq!(document, before);
+    }
 }

@@ -6,9 +6,10 @@ mod geometry;
 
 pub use command::PatternCommand;
 pub use document::{
-    Document, Grainline, LineSegment, PatternPoint, Piece, PieceId, PieceMetadata, PointId,
+    CubicBezierSegment, Document, Grainline, LineSegment, PatternPoint, Piece, PieceId,
+    PieceMetadata, PointId,
 };
-pub use geometry::{CanvasPoint, MmPoint, ViewTransform};
+pub use geometry::{CanvasPoint, MmPoint, ViewTransform, cubic_bezier_point};
 
 #[derive(Debug)]
 pub enum PatternError {

@@ -38,14 +38,22 @@ works locally, with no account or online service required to edit and save.
 ## Features
 
 These features are available in the current prototype, which opens a
-**400 × 600 mm rectangular skirt panel** with four connected corners, piece
-metadata, and a vertical grainline.
+**400 × 600 mm skirt panel** with three straight edges, a cubic Bézier top edge,
+four corners, two control handles, piece metadata, and a vertical grainline.
 
 ### Edit in real measurements
 
 Drag a corner, enter exact X/Y coordinates, or apply a relative offset in
 millimeters. Connected segments follow the edited point. Measurements stay in
 physical units at every zoom level.
+
+### Shape a curved edge
+
+Drag either violet square **H5 / H6** to reshape the sample's Bézier top edge.
+Thin violet guides connect each handle to its endpoint. Corners **P3 / P4** move
+the ends of the curve. Select any corner or handle to enter exact X/Y coordinates
+or apply a relative offset in millimeters. Handle edits use the same undo/redo
+and save/load behavior as corner edits.
 
 ### Inspect the whole piece or a single corner
 
@@ -86,8 +94,8 @@ is part of evaluating this early milestone.
 <details>
 <summary>Canvas controls and file handling</summary>
 
-- **Select and move:** click a corner to select it, then drag it. Selection uses a
-  constant display radius at every zoom level.
+- **Select and move:** click a corner or square handle to select it, then drag it.
+  Selection uses a constant display radius at every zoom level.
 - **Set coordinates:** enter X/Y in the inspector and click **Apply coordinates**.
 - **Move by an offset:** select a corner, enter **dX/dY (mm)** under **Relative
   move**, then click **Offset point**. Each click adds the offset again. For example,
@@ -114,14 +122,14 @@ is part of evaluating this early milestone.
 demonstration, not a finished sewing pattern. The current work establishes the
 editing, validation, and persistence foundations for a larger garment tool.
 
-Curves, seam allowances, point or segment creation, metadata or grainline editing,
-snapping, grading, printing, and external CAD file formats are outside this
-milestone. Native file dialogs, autosave, and unsaved-change confirmation are also
-unavailable.
+Creating new curves, seam allowances, point or segment creation, metadata or
+grainline editing, snapping, grading, printing, and external CAD file formats are
+outside this milestone. Native file dialogs, autosave, and unsaved-change
+confirmation are also unavailable.
 
-Platform coverage is limited. Native pinch gestures and the updated undo/redo
-buttons and shortcuts still need a fresh manual desktop check. Automated tests
-cover interaction behavior, but do not replace that check.
+Platform coverage is limited. Native pinch gestures and a complete manual pass of
+the new curve controls still need verification. Automated tests cover interaction
+behavior, but do not replace that check.
 
 The long-term direction is broader access to garment design and production tools.
 Progress starts with making this small prototype dependable and learning from
@@ -140,6 +148,13 @@ crates/pattern-desktop  egui/eframe application, canvas interaction, filesystem 
 - **Local persistence:** versioned JSON with UI state kept out of documents.
 - **Small core:** no GUI, filesystem, clock, random, or network dependencies.
 
+The core also exposes `cubic_bezier_point([start, handle1, handle2, end], t)` for
+evaluating a cubic Bézier in `f64` millimeters. It uses de Casteljau interpolation
+and accepts finite controls and a finite parameter in `[0, 1]`; invalid inputs
+return an error. For controls `(0, 0)`, `(0, 100)`, `(100, 100)`, `(100, 0)`,
+`t = 0.5` gives `(50, 75)` mm. The canvas uses this helper to draw the editable
+sample curve, with bounded sampling that becomes denser as the view zooms in.
+
 <details>
 <summary>Document model, command examples, and persistence details</summary>
 
@@ -151,8 +166,10 @@ only the renderer converts coordinates to `f32`.
 
 Documents contain ordered pieces with stable piece and point IDs. Segments refer
 to point IDs, so connected segments follow an edited point without copying its
-coordinates. Grainlines have independent physical endpoints and remain unchanged
-when a corner moves.
+coordinates. Cubic Bézier segments also reference four distinct point IDs:
+`start`, `control_start`, `control_end`, and `end`. The controls are ordinary physical
+points; handle markers and guides are only rendering state. Grainlines have
+independent physical endpoints and remain unchanged when a corner moves.
 
 All document edits go through `PatternCommand` and `Document::apply`. Commands
 validate before mutation; rejected edits leave the document unchanged. The current
@@ -195,9 +212,23 @@ after undo and redo.
 
 ### Persistence and validation
 
-Document JSON uses `schema_version: 1`, with all coordinates in millimeters.
+Document JSON now writes `schema_version: 2`, with all coordinates in millimeters.
+Each piece may contain a `beziers` array; it is omitted when empty. The sample's
+curve field is:
+
+```json
+{
+  "beziers": [
+    {"start":3,"control_start":5,"control_end":6,"end":4}
+  ]
+}
+```
+
+Version 1 documents with straight segments still load, are normalized to version 2,
+and save in the new format. Older application versions cannot read version 2 files.
 Unsupported versions, unknown fields, duplicate IDs, missing segment endpoints,
-invalid metadata, nonfinite coordinates, and zero-length grainlines are rejected.
+missing or repeated Bézier point references, invalid metadata, nonfinite coordinates,
+and zero-length grainlines are rejected.
 The JSON serializer preserves `f64` values through round trips.
 
 Save validates and serializes the document, writes and syncs a temporary sibling
@@ -229,9 +260,12 @@ cargo run -p pattern-desktop --offline
 
 Omit `--offline` when dependencies need to be fetched.
 
-Tests cover geometry and view transforms, point editing, segment references,
-atomic command rejection, relative movement and overflow, document validation,
-JSON round trips, canvas interaction, save/load, and undo/redo behavior.
+Tests cover cubic Bézier endpoints, known interior points, straight and degenerate
+curves, parameter reversal, large coordinates and invalid inputs; view transforms,
+curve references and version 1 migration, handle dragging at different zoom levels,
+handle undo/redo and persistence; point editing, segment references, atomic command
+rejection, relative movement and overflow, document validation, JSON round trips,
+canvas interaction, save/load, and undo/redo behavior.
 Manually verify selection, dragging, panning, zooming, and save/load in the desktop
 when changing interaction behavior.
 

@@ -1,6 +1,6 @@
 use crate::app::{PatternApp, Selection};
 use eframe::egui::{self, Color32, PointerButton, Pos2, Rect, Sense, Stroke, Vec2};
-use pattern_core::{CanvasPoint, MmPoint, ViewTransform};
+use pattern_core::{CanvasPoint, MmPoint, ViewTransform, cubic_bezier_point};
 
 #[derive(Clone, Copy)]
 pub(crate) struct Drag {
@@ -24,6 +24,19 @@ fn local(rect: Rect, pos: Pos2) -> CanvasPoint {
         f64::from(pos.x - rect.left()),
         f64::from(pos.y - rect.top()),
     )
+}
+
+/// Bound drawing work while increasing sampling density with the projected control polygon.
+fn bezier_polyline(controls: [MmPoint; 4], scale: f64) -> Option<Vec<MmPoint>> {
+    let polygon_length: f64 = controls
+        .windows(2)
+        .map(|pair| (pair[1].x - pair[0].x).hypot(pair[1].y - pair[0].y))
+        .sum();
+    let steps = (polygon_length * scale / 6.0).ceil().clamp(16.0, 1024.0) as usize;
+    (0..=steps)
+        .map(|step| cubic_bezier_point(controls, step as f64 / steps as f64))
+        .collect::<Result<Vec<_>, _>>()
+        .ok()
 }
 
 impl PatternApp {
@@ -214,6 +227,7 @@ impl PatternApp {
         let ink = Color32::from_rgb(34, 79, 86);
         let accent = Color32::from_rgb(10, 139, 129);
         let grain = Color32::from_rgb(187, 122, 40);
+        let handle_color = Color32::from_rgb(131, 102, 180);
         painter.rect_filled(rect, 0.0, Color32::from_rgb(244, 243, 235));
 
         // Adaptive grid, bounded by the visible canvas (never the document's full extents).
@@ -248,6 +262,26 @@ impl PatternApp {
         }
 
         for piece in &self.document.pieces {
+            for curve in &piece.beziers {
+                if let Some(controls) = piece.bezier_controls(curve)
+                    && let Some(points) = bezier_polyline(controls, self.view.scale())
+                {
+                    for [anchor, handle] in [[controls[0], controls[1]], [controls[3], controls[2]]]
+                    {
+                        painter.line_segment(
+                            [self.screen(rect, anchor), self.screen(rect, handle)],
+                            Stroke::new(1.0, handle_color),
+                        );
+                    }
+                    painter.add(egui::Shape::line(
+                        points
+                            .into_iter()
+                            .map(|point| self.screen(rect, point))
+                            .collect(),
+                        Stroke::new(2.5, ink),
+                    ));
+                }
+            }
             for segment in &piece.segments {
                 if let (Some(start), Some(end)) =
                     (piece.point(segment.start), piece.point(segment.end))
@@ -285,14 +319,23 @@ impl PatternApp {
                         point: point.id,
                     });
                 let pos = self.screen(rect, point.position);
+                let handle = piece.is_bezier_handle(point.id);
                 if selected {
                     painter.circle_stroke(pos, 10.0, Stroke::new(2.0, accent));
                 }
-                painter.circle_filled(pos, 5.0, if selected { accent } else { ink });
+                if handle {
+                    painter.rect_filled(
+                        Rect::from_center_size(pos, Vec2::splat(10.0)),
+                        1.0,
+                        if selected { accent } else { handle_color },
+                    );
+                } else {
+                    painter.circle_filled(pos, 5.0, if selected { accent } else { ink });
+                }
                 painter.text(
                     pos + Vec2::new(12.0, 12.0),
                     egui::Align2::LEFT_TOP,
-                    format!("P{}", point.id.0),
+                    format!("{}{}", if handle { "H" } else { "P" }, point.id.0),
                     egui::FontId::proportional(12.0),
                     ink,
                 );
@@ -342,6 +385,70 @@ mod tests {
             button,
             pressed,
             modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn curve_sampling_preserves_endpoints_and_scales_with_a_bounded_workload() {
+        let controls = [
+            MmPoint::new(0.0, 0.0),
+            MmPoint::new(0.0, 100.0),
+            MmPoint::new(100.0, 100.0),
+            MmPoint::new(100.0, 0.0),
+        ];
+        let low_zoom = bezier_polyline(controls, ViewTransform::MIN_SCALE).unwrap();
+        let high_zoom = bezier_polyline(controls, ViewTransform::MAX_SCALE).unwrap();
+        assert_eq!(low_zoom.first(), Some(&controls[0]));
+        assert_eq!(low_zoom.last(), Some(&controls[3]));
+        assert_eq!(low_zoom[8], MmPoint::new(50.0, 75.0));
+        assert_eq!(low_zoom.len(), 17);
+        assert_eq!(high_zoom.len(), 1025);
+        assert_eq!(high_zoom.first(), Some(&controls[0]));
+        assert_eq!(high_zoom.last(), Some(&controls[3]));
+        assert!(high_zoom.iter().all(|point| point.is_finite()));
+    }
+
+    #[test]
+    fn curve_handles_drag_in_millimeters_at_two_zoom_levels_and_undo_as_one_edit() {
+        for scale in [0.5, 2.0] {
+            let ctx = egui::Context::default();
+            let mut app = PatternApp {
+                view: ViewTransform::new(CanvasPoint::new(100.0, 80.0 + 600.0 * scale), scale)
+                    .unwrap(),
+                fit_pending: false,
+                ..Default::default()
+            };
+            frame(&mut app, &ctx, vec![]);
+            let original = app.document.clone();
+            let start = Pos2::new((100.0 + 300.0 * scale) as f32, (80.0 + 80.0 * scale) as f32);
+            let end = start + Vec2::new(20.0, -30.0);
+            frame(
+                &mut app,
+                &ctx,
+                vec![
+                    egui::Event::PointerMoved(start),
+                    button(start, PointerButton::Primary, true),
+                ],
+            );
+            assert_eq!(app.selected.unwrap().point, pattern_core::PointId(5));
+            frame(&mut app, &ctx, vec![egui::Event::PointerMoved(end)]);
+            frame(
+                &mut app,
+                &ctx,
+                vec![button(end, PointerButton::Primary, false)],
+            );
+            let piece = &app.document.pieces[0];
+            let controls = piece.bezier_controls(&piece.beziers[0]).unwrap();
+            assert_eq!(
+                controls[1],
+                MmPoint::new(300.0 + 20.0 / scale, 520.0 + 30.0 / scale)
+            );
+            assert_eq!(piece.beziers, original.pieces[0].beziers);
+            assert_eq!(piece.points[..4], original.pieces[0].points[..4]);
+            assert_eq!(app.undo_edits.len(), 1);
+            app.undo();
+            assert_eq!(app.document, original);
+            assert!(!app.dirty);
         }
     }
 

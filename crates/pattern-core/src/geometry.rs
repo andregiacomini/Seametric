@@ -19,6 +19,50 @@ impl MmPoint {
     }
 }
 
+/// Evaluate a cubic Bézier at `t` in the inclusive interval `[0, 1]`.
+///
+/// Controls are ordered as start, first handle, second handle, end, in millimeters.
+/// Uses de Casteljau interpolation; rejects nonfinite controls and invalid parameters.
+///
+/// ```
+/// use pattern_core::{MmPoint, cubic_bezier_point};
+///
+/// let controls = [
+///     MmPoint::new(0.0, 0.0),
+///     MmPoint::new(0.0, 100.0),
+///     MmPoint::new(100.0, 100.0),
+///     MmPoint::new(100.0, 0.0),
+/// ];
+/// assert_eq!(cubic_bezier_point(controls, 0.5).unwrap(), MmPoint::new(50.0, 75.0));
+/// ```
+pub fn cubic_bezier_point(controls: [MmPoint; 4], t: f64) -> Result<MmPoint, PatternError> {
+    if !controls.iter().all(|point| point.is_finite()) {
+        return Err(PatternError::Invalid(
+            "Bezier controls must be finite millimeters".into(),
+        ));
+    }
+    if !t.is_finite() || !(0.0..=1.0).contains(&t) {
+        return Err(PatternError::Invalid(
+            "Bezier parameter must be finite and between 0 and 1".into(),
+        ));
+    }
+
+    // Weighted interpolation avoids overflowing b - a for opposite large coordinates.
+    let blend =
+        |a: MmPoint, b: MmPoint| MmPoint::new((1.0 - t) * a.x + t * b.x, (1.0 - t) * a.y + t * b.y);
+    let [a, b, c, d] = controls;
+    let point = blend(
+        blend(blend(a, b), blend(b, c)),
+        blend(blend(b, c), blend(c, d)),
+    );
+    if !point.is_finite() {
+        return Err(PatternError::Invalid(
+            "Bezier evaluation must produce finite millimeters".into(),
+        ));
+    }
+    Ok(point)
+}
+
 /// Canvas-local logical display units, x right and y down (egui points, not hardware pixels).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CanvasPoint {
@@ -107,6 +151,102 @@ mod tests {
 
     fn close(a: f64, b: f64) {
         assert!((a - b).abs() < 1e-9, "{a} != {b}");
+    }
+
+    fn arch() -> [MmPoint; 4] {
+        [
+            MmPoint::new(0.0, 0.0),
+            MmPoint::new(0.0, 100.0),
+            MmPoint::new(100.0, 100.0),
+            MmPoint::new(100.0, 0.0),
+        ]
+    }
+
+    #[test]
+    fn cubic_bezier_preserves_endpoints_and_matches_known_interior_points() {
+        let controls = arch();
+        assert_eq!(cubic_bezier_point(controls, 0.0).unwrap(), controls[0]);
+        assert_eq!(cubic_bezier_point(controls, 1.0).unwrap(), controls[3]);
+        for (t, expected) in [
+            (0.25, MmPoint::new(15.625, 56.25)),
+            (0.5, MmPoint::new(50.0, 75.0)),
+            (0.75, MmPoint::new(84.375, 56.25)),
+        ] {
+            let point = cubic_bezier_point(controls, t).unwrap();
+            close(point.x, expected.x);
+            close(point.y, expected.y);
+        }
+    }
+
+    #[test]
+    fn cubic_bezier_collinear_controls_give_constant_speed_line() {
+        let controls = [
+            MmPoint::new(-30.0, 12.0),
+            MmPoint::new(-10.0, 2.0),
+            MmPoint::new(10.0, -8.0),
+            MmPoint::new(30.0, -18.0),
+        ];
+        for t in [0.0, 0.1, 0.25, 0.7, 1.0] {
+            let point = cubic_bezier_point(controls, t).unwrap();
+            close(point.x, -30.0 + 60.0 * t);
+            close(point.y, 12.0 - 30.0 * t);
+        }
+    }
+
+    #[test]
+    fn cubic_bezier_reversing_controls_reverses_parameter_direction() {
+        let controls = arch();
+        let reversed = [controls[3], controls[2], controls[1], controls[0]];
+        for t in [0.0, 0.125, 0.3, 0.5, 1.0] {
+            let forward = cubic_bezier_point(controls, t).unwrap();
+            let backward = cubic_bezier_point(reversed, 1.0 - t).unwrap();
+            close(forward.x, backward.x);
+            close(forward.y, backward.y);
+        }
+    }
+
+    #[test]
+    fn cubic_bezier_repeated_controls_and_large_coordinates_remain_finite() {
+        let point = MmPoint::new(-123.25, 45.5);
+        for t in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            assert_eq!(cubic_bezier_point([point; 4], t).unwrap(), point);
+        }
+        let large = MmPoint::new(f64::MAX, -f64::MAX);
+        assert_eq!(cubic_bezier_point([large; 4], 0.5).unwrap(), large);
+        let opposite = MmPoint::new(-f64::MAX, f64::MAX);
+        assert_eq!(
+            cubic_bezier_point([large, large, opposite, opposite], 0.5).unwrap(),
+            MmPoint::new(0.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn cubic_bezier_rejects_nonfinite_controls_and_out_of_range_parameters() {
+        for t in [
+            -1.0,
+            -f64::EPSILON,
+            1.0 + f64::EPSILON,
+            f64::NAN,
+            f64::INFINITY,
+        ] {
+            assert!(cubic_bezier_point(arch(), t).is_err());
+        }
+        for i in 0..4 {
+            for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                for axis in 0..2 {
+                    let mut controls = arch();
+                    if axis == 0 {
+                        controls[i].x = invalid;
+                    } else {
+                        controls[i].y = invalid;
+                    }
+                    // Validate all controls even when evaluating an endpoint.
+                    for t in [0.0, 0.5, 1.0] {
+                        assert!(cubic_bezier_point(controls, t).is_err());
+                    }
+                }
+            }
+        }
     }
 
     #[test]
