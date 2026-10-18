@@ -1,0 +1,4 @@
+/target/
+/pattern.json
+/smoke-test.json
+.DS_Store
